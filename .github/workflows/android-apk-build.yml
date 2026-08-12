@@ -1,0 +1,107 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_SDK_ROOT: /opt/android-sdk
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Cache node modules
+        uses: actions/cache@v3
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build web assets
+        run: npm run build
+
+      - name: Setup Java (Temurin 11)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '11'
+
+      - name: Install Android SDK command-line tools and required SDKs
+        run: |
+          sudo mkdir -p ${ANDROID_SDK_ROOT}
+          sudo chown $USER ${ANDROID_SDK_ROOT}
+          curl -sSLo commandlinetools.zip "https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip"
+          unzip -q commandlinetools.zip -d ${ANDROID_SDK_ROOT}/cmdline-tools
+          mkdir -p ${ANDROID_SDK_ROOT}/cmdline-tools/latest
+          mv ${ANDROID_SDK_ROOT}/cmdline-tools/cmdline-tools/* ${ANDROID_SDK_ROOT}/cmdline-tools/latest/
+          yes | ${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager --sdk_root=${ANDROID_SDK_ROOT} --install "platform-tools" "platforms;android-33" "build-tools;33.0.2"
+          echo "ANDROID_HOME=${ANDROID_SDK_ROOT}" >> $GITHUB_ENV
+          echo "${ANDROID_SDK_ROOT}/platform-tools" >> $GITHUB_PATH
+          echo "${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin" >> $GITHUB_PATH
+
+      - name: Ensure Android directory exists (Capacitor/Native Android)
+        run: |
+          if [ ! -d "android" ]; then
+            echo "Warning: android/ directory not found. If you use Capacitor, run 'npx cap add android' locally to create it before relying on this workflow.";
+          else
+            echo "android directory present";
+          fi
+
+      - name: Copy/sync web assets to Android (Capacitor)
+        run: npx cap sync android || true
+
+      - name: Build Android release APK
+        working-directory: android
+        run: ./gradlew assembleRelease --no-daemon -Porg.gradle.jvmargs='-Xmx3g'
+
+      - name: Sign APK (optional, if keystore secrets provided)
+        if: ${{ secrets.KEYSTORE_BASE64 != '' }}
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -e
+          APK_DIR=app/build/outputs/apk/release
+          UNSIGNED="$APK_DIR/app-release-unsigned.apk"
+          RELEASE_APK="$APK_DIR/app-release.apk"
+          # decode keystore
+          echo "$KEYSTORE_BASE64" | base64 -d > release.keystore
+          # if unsigned exists, sign it and zipalign
+          if [ -f "$UNSIGNED" ]; then
+            echo "Signing $UNSIGNED"
+            ${ANDROID_SDK_ROOT}/build-tools/33.0.2/apksigner sign --ks release.keystore --ks-pass pass:$KEYSTORE_PASSWORD --key-pass pass:$KEY_PASSWORD --out "$APK_DIR/app-release-signed.apk" "$UNSIGNED" || true
+            ${ANDROID_SDK_ROOT}/build-tools/33.0.2/zipalign -v -p 4 "$APK_DIR/app-release-signed.apk" "$APK_DIR/app-release-aligned.apk" || true
+            mv "$APK_DIR/app-release-aligned.apk" "$APK_DIR/app-release-signed-final.apk" || true
+          else
+            # try to sign any apk in dir
+            for f in "$APK_DIR"/*.apk; do
+              if [ -f "$f" ]; then
+                echo "Signing $f"
+                ${ANDROID_SDK_ROOT}/build-tools/33.0.2/apksigner sign --ks release.keystore --ks-pass pass:$KEYSTORE_PASSWORD --key-pass pass:$KEY_PASSWORD "$f" || true
+              fi
+            done
+          fi
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: android/app/build/outputs/apk/release/**/*.apk
