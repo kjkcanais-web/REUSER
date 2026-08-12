@@ -1,0 +1,29 @@
+      - name: Sign APK (optional, if keystore secrets provided)
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -e
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "No KEYSTORE_BASE64 secret set — skipping signing step."
+            exit 0
+          fi
+          APK_DIR=app/build/outputs/apk/release
+          UNSIGNED="$APK_DIR/app-release-unsigned.apk"
+          # decode keystore
+          echo "$KEYSTORE_BASE64" | base64 -d > release.keystore
+          if [ -f "$UNSIGNED" ]; then
+            echo "Signing $UNSIGNED"
+            ${ANDROID_SDK_ROOT}/build-tools/33.0.2/apksigner sign --ks release.keystore --ks-pass pass:$KEYSTORE_PASSWORD --key-pass pass:$KEY_PASSWORD --out "$APK_DIR/app-release-signed.apk" "$UNSIGNED"
+            ${ANDROID_SDK_ROOT}/build-tools/33.0.2/zipalign -v -p 4 "$APK_DIR/app-release-signed.apk" "$APK_DIR/app-release-aligned.apk"
+            mv "$APK_DIR/app-release-aligned.apk" "$APK_DIR/app-release-signed-final.apk"
+          else
+            for f in "$APK_DIR"/*.apk; do
+              if [ -f "$f" ]; then
+                echo "Signing $f"
+                ${ANDROID_SDK_ROOT}/build-tools/33.0.2/apksigner sign --ks release.keystore --ks-pass pass:$KEYSTORE_PASSWORD --key-pass pass:$KEY_PASSWORD "$f"
+              fi
+            done
+          fi
